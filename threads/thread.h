@@ -95,7 +95,8 @@ struct thread
 
     /* Xiaoyu: add a new attribute to check the blocking time */
     int block_ticks;
-      
+    /* Xiaoyu: add a new attribute to record original priority */
+    int old_priority;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -141,5 +142,10 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+/* Xiaoyu: help to sort or insert the list by priority from high to low*/
+bool priority_higher (const struct list_elem *a,
+                      const struct list_elem *b,void *aux);
+bool alloc_ready;
 
 #endif /* threads/thread.h */

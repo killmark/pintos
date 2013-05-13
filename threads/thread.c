@@ -92,6 +92,8 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  /* Xiaoyu: init lock_list */
+  list_init (&lock_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -166,50 +168,50 @@ tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
 {
-  struct thread *t;
-  struct kernel_thread_frame *kf;
-  struct switch_entry_frame *ef;
-  struct switch_threads_frame *sf;
-  tid_t tid;
-  enum intr_level old_level;
+    struct thread *t;
+    struct kernel_thread_frame *kf;
+    struct switch_entry_frame *ef;
+    struct switch_threads_frame *sf;
+    tid_t tid;
+    enum intr_level old_level;
 
-  ASSERT (function != NULL);
+    ASSERT (function != NULL);
 
-  /* Allocate thread. */
-  t = palloc_get_page (PAL_ZERO);
-  if (t == NULL)
-    return TID_ERROR;
+    /* Allocate thread. */
+    t = palloc_get_page (PAL_ZERO);
+    if (t == NULL)
+        return TID_ERROR;
 
-  /* Initialize thread. */
-  init_thread (t, name, priority);
-  tid = t->tid = allocate_tid ();
+    /* Initialize thread. */
+    init_thread (t, name, priority);
+    tid = t->tid = allocate_tid ();
 
-  /* Prepare thread for first run by initializing its stack.
-     Do this atomically so intermediate values for the 'stack' 
-     member cannot be observed. */
-  old_level = intr_disable ();
+    /* Prepare thread for first run by initializing its stack.
+       Do this atomically so intermediate values for the 'stack' 
+       member cannot be observed. */
+    old_level = intr_disable ();
 
-  /* Stack frame for kernel_thread(). */
-  kf = alloc_frame (t, sizeof *kf);
-  kf->eip = NULL;
-  kf->function = function;
-  kf->aux = aux;
+    /* Stack frame for kernel_thread(). */
+    kf = alloc_frame (t, sizeof *kf);
+    kf->eip = NULL;
+    kf->function = function;
+    kf->aux = aux;
 
-  /* Stack frame for switch_entry(). */
-  ef = alloc_frame (t, sizeof *ef);
-  ef->eip = (void (*) (void)) kernel_thread;
+    /* Stack frame for switch_entry(). */
+    ef = alloc_frame (t, sizeof *ef);
+    ef->eip = (void (*) (void)) kernel_thread;
 
-  /* Stack frame for switch_threads(). */
-  sf = alloc_frame (t, sizeof *sf);
-  sf->eip = switch_entry;
-  sf->ebp = 0;
+    /* Stack frame for switch_threads(). */
+    sf = alloc_frame (t, sizeof *sf);
+    sf->eip = switch_entry;
+    sf->ebp = 0;
 
-  intr_set_level (old_level);
+    intr_set_level (old_level);
 
-  /* Add to run queue. */
-  thread_unblock (t);
+    /* Add to run queue. */
+    thread_unblock (t);
 
-  return tid;
+    return tid;
 }
 
 /* Puts the current thread to sleep.  It will not be scheduled
@@ -239,15 +241,28 @@ thread_block (void)
 void
 thread_unblock (struct thread *t) 
 {
-  enum intr_level old_level;
+    enum intr_level old_level;
 
-  ASSERT (is_thread (t));
+    ASSERT (is_thread (t));
 
-  old_level = intr_disable ();
-  ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
-  t->status = THREAD_READY;
-  intr_set_level (old_level);
+    old_level = intr_disable ();
+    ASSERT (t->status == THREAD_BLOCKED);
+    /* list_push_back (&ready_list, &t->elem); */
+    /* Xiaoyu: insert thread to ready_list in order */
+    list_insert_ordered(&ready_list, &t->elem, priority_higher, NULL);
+    t->status = THREAD_READY;
+    
+    struct list_elem *thread_max = list_front(&ready_list);
+    int max_priority = list_entry(thread_max, struct thread, elem)->priority;
+
+    struct thread* current = thread_current(); 
+    if(max_priority > current->priority && current != idle_thread){
+        if (intr_context ())
+            intr_yield_on_return ();
+        else
+            thread_yield ();
+    }
+    intr_set_level (old_level);
 }
 
 /* Returns the name of the running thread. */
@@ -309,17 +324,19 @@ thread_exit (void)
 void
 thread_yield (void) 
 {
-  struct thread *cur = thread_current ();
-  enum intr_level old_level;
+    struct thread *cur = thread_current ();
+    enum intr_level old_level;
   
-  ASSERT (!intr_context ());
+    ASSERT (!intr_context ());
 
-  old_level = intr_disable ();
-  if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
-  cur->status = THREAD_READY;
-  schedule ();
-  intr_set_level (old_level);
+    old_level = intr_disable ();
+    if (cur != idle_thread) {
+        /* list_push_back (&ready_list, &cur->elem); */
+        list_insert_ordered(&ready_list,&cur->elem,priority_higher,NULL);
+    }
+    cur->status = THREAD_READY;
+    schedule ();
+    intr_set_level (old_level);
 }
 
 /* Invoke function 'func' on all threads, passing along 'aux'.
@@ -343,7 +360,43 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+    enum intr_level old_level;
+    struct thread* cur = thread_current();
+    
+    old_level = intr_disable();
+    
+    /* Xiaoyu: set new priority */
+    cur->priority = new_priority;
+    cur->old_priority = new_priority;
+
+    struct list_elem *e;
+    struct lock_elem *l;
+    int tmp_priority;
+    for (e = list_begin (&lock_list); e != list_end (&lock_list); e = list_next (e)){
+        l = list_entry (e, struct lock_elem, elem);
+        if(cur == l->lock->holder){
+            tmp_priority = list_entry(list_max(&l->lock->semaphore.waiters, priority_higher, NULL),
+                                      struct thread,
+                                      elem)->priority;
+            if(cur->priority < tmp_priority)
+                cur->priority = tmp_priority;
+        }
+    }
+    
+    /* Xiaoyu: yield the cpu if current is not the max priority */
+    if(!list_empty(&ready_list)){
+        struct list_elem *thread_max = list_max(&ready_list, priority_higher, NULL);
+        int max_priority = list_entry(thread_max, struct thread, elem)->priority;
+        if(max_priority > cur->priority){
+            if (intr_context ())
+                intr_yield_on_return ();
+            else
+                thread_yield ();
+        }
+    }
+    intr_set_level (old_level);
+
+    
 }
 
 /* Returns the current thread's priority. */
@@ -468,6 +521,7 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->old_priority = priority;
   t->block_ticks = 0;
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
@@ -494,10 +548,15 @@ alloc_frame (struct thread *t, size_t size)
 static struct thread *
 next_thread_to_run (void) 
 {
-  if (list_empty (&ready_list))
-    return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+    /* Xiaoyu: May change pop front in the future. */
+    if (list_empty (&ready_list))
+        return idle_thread;
+    else{
+        /* Xiaoyu: make sure the list is in order */
+        list_sort(&ready_list, priority_higher, NULL);
+        return list_entry (list_pop_front (&ready_list), struct thread, elem);
+    }
+    
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -586,3 +645,16 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+/* Xiaoyu: help insert or sort the list by priority from high to low */
+bool priority_higher (const struct list_elem *a,
+                      const struct list_elem *b,void *aux)
+{
+  struct thread *a_thread,*b_thread;
+  a_thread = list_entry (a, struct thread, elem);
+  b_thread = list_entry (b, struct thread,elem);
+
+  return(a_thread->priority > b_thread->priority);
+}
+
+

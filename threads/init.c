@@ -128,6 +128,9 @@ main (void)
 #endif
 
   printf ("Boot complete.\n");
+
+  /* Xiaoyu: Can't use alloc before it */
+  alloc_ready = true;
   
   /* Run actions specified on kernel command line. */
   run_actions (argv);
