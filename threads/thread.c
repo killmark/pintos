@@ -11,6 +11,9 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "fixed-point.h"
+#include "devices/timer.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -71,6 +74,9 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+/* Xiaoyu: load_avg */
+int64_t load_avg;
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -124,22 +130,59 @@ thread_start (void)
 void
 thread_tick (void) 
 {
-  struct thread *t = thread_current ();
+    struct thread *t = thread_current ();
 
-  /* Update statistics. */
-  if (t == idle_thread)
-    idle_ticks++;
+    /* Update statistics. */
+    if (t == idle_thread)
+        idle_ticks++;
 #ifdef USERPROG
-  else if (t->pagedir != NULL)
-    user_ticks++;
+    else if (t->pagedir != NULL){
+        user_ticks++;
+        if(thread_mlfqs)
+        {
+            /* Xiaoyu: renew cpu */
+            t->recent_cpu = FADDI(t->recent_cpu, 1);
+        }
+    }
 #endif
-  else
-    kernel_ticks++;
+    else{
+        kernel_ticks++;
+        if(thread_mlfqs)
+        {
+            /* Xiaoyu: renew cpu */
+            t->recent_cpu = FADDI(t->recent_cpu, 1);
+        }
+    }
 
-  /* Enforce preemption. */
-  if (++thread_ticks >= TIME_SLICE)
-    intr_yield_on_return ();
+    if(thread_mlfqs)
+    {
+        if(timer_ticks()%TIMER_FREQ == 0)
+        {
+            /* renew load_avg and recent_cpu */
+            renew_load_avg();
+            renew_all_cpu();
+        }
+    }
+
+    if(thread_mlfqs && timer_ticks()%4 == 0)
+        renew_all_priority();
+
+    /* Enforce preemption. */
+    if (++thread_ticks >= TIME_SLICE)
+        intr_yield_on_return ();
 }
+
+void renew_all_cpu(void){
+    
+    ASSERT (intr_get_level () == INTR_OFF);
+    struct list_elem *e;
+    for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e))
+    {
+        renew_recent_cpu(list_entry(e, struct thread, allelem));
+    }
+}
+
+
 
 /* Prints thread statistics. */
 void
@@ -303,20 +346,20 @@ thread_tid (void)
 void
 thread_exit (void) 
 {
-  ASSERT (!intr_context ());
+    ASSERT (!intr_context ());
 
 #ifdef USERPROG
-  process_exit ();
+    process_exit ();
 #endif
 
-  /* Remove thread from all threads list, set our status to dying,
-     and schedule another process.  That process will destroy us
-     when it calls thread_schedule_tail(). */
-  intr_disable ();
-  list_remove (&thread_current()->allelem);
-  thread_current ()->status = THREAD_DYING;
-  schedule ();
-  NOT_REACHED ();
+    /* Remove thread from all threads list, set our status to dying,
+       and schedule another process.  That process will destroy us
+       when it calls thread_schedule_tail(). */
+    intr_disable ();
+    list_remove (&thread_current()->allelem);
+    thread_current ()->status = THREAD_DYING;
+    schedule ();
+    NOT_REACHED ();
 }
 
 /* Yields the CPU.  The current thread is not put to sleep and
@@ -363,6 +406,9 @@ thread_set_priority (int new_priority)
     enum intr_level old_level;
     struct thread* cur = thread_current();
     
+    if(thread_mlfqs)
+        return;
+    
     old_level = intr_disable();
     
     /* Xiaoyu: set new priority */
@@ -408,9 +454,10 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
   /* Not yet implemented. */
+    thread_current()->nice = nice;
 }
 
 /* Returns the current thread's nice value. */
@@ -418,7 +465,7 @@ int
 thread_get_nice (void) 
 {
   /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
@@ -426,15 +473,16 @@ int
 thread_get_load_avg (void) 
 {
   /* Not yet implemented. */
-  return 0;
+  return F2INEAR(load_avg*100);
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+    /* Not yet implemented. */
+    /* Xiaoyu */
+    return F2INEAR(thread_current()->recent_cpu*100);
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -512,19 +560,69 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-  ASSERT (t != NULL);
-  ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
-  ASSERT (name != NULL);
+    ASSERT (t != NULL);
+    ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
+    ASSERT (name != NULL);
 
-  memset (t, 0, sizeof *t);
-  t->status = THREAD_BLOCKED;
-  strlcpy (t->name, name, sizeof t->name);
-  t->stack = (uint8_t *) t + PGSIZE;
-  t->priority = priority;
-  t->old_priority = priority;
-  t->block_ticks = 0;
-  t->magic = THREAD_MAGIC;
-  list_push_back (&all_list, &t->allelem);
+    memset (t, 0, sizeof *t);
+    t->status = THREAD_BLOCKED;
+    strlcpy (t->name, name, sizeof t->name);
+    t->stack = (uint8_t *) t + PGSIZE;
+    
+    if(thread_mlfqs){
+        t->recent_cpu=0;
+        t->nice=0;
+        renew_priority(t); 
+    }
+    else{
+        t->priority = priority;
+        t->old_priority = priority;
+    }
+  
+    t->block_ticks = 0;
+    t->magic = THREAD_MAGIC;
+    list_push_back (&all_list, &t->allelem);
+}
+
+int get_ready_threads(void){
+    int rt = list_size(&ready_list);
+    if(thread_current() != idle_thread)
+        rt++;
+    return rt;
+}
+
+void renew_priority(struct thread* t)
+{
+        t->priority = PRI_MAX-F2INEAR(t->recent_cpu/4)-(t->nice*2);
+        if(t->priority > PRI_MAX)
+                t->priority = PRI_MAX;
+        if(t->priority < PRI_MIN)
+                t->priority = PRI_MIN;
+}
+
+void renew_recent_cpu(struct thread* t)
+{
+        t->recent_cpu = FMUL(FDIV(load_avg*2, FADDI(load_avg*2, 1)), t->recent_cpu);
+        t->recent_cpu = FADDI(t->recent_cpu, t->nice);
+}
+
+void renew_load_avg(void)
+{
+    load_avg = FMUL(INT2F(59)/60, load_avg);
+    load_avg += (INT2F(1)/60) * get_ready_threads();
+}
+
+void renew_all_priority(void)
+{
+    struct list_elem *e;
+     for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e))
+    {
+        if(list_entry(e, struct thread, allelem) == idle_thread)
+            continue;
+        renew_priority(list_entry(e, struct thread, allelem));
+     }
+    list_sort(&ready_list,priority_higher,NULL);
+    intr_yield_on_return ();        
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

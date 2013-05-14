@@ -50,6 +50,7 @@ void cond_broadcast (struct condition *, struct lock *);
 
 /* Xiaoyu: sort the list of cond */
 bool cond_higher (const struct list_elem *a, const struct list_elem *b,void *aux);
+bool lock_higher (const struct list_elem *a, const struct list_elem *b,void *aux);
 
 /* Optimization barrier.
 

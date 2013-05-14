@@ -196,6 +196,15 @@ lock_init (struct lock *lock)
     
 }
 
+bool lock_higher (const struct list_elem *a, const struct list_elem *b, void *aux){
+    struct thread *al = list_entry (a, struct lock_elem, elem)->lock->holder;
+    struct thread *bl = list_entry (b, struct lock_elem, elem)->lock->holder;
+    int ap, bp;
+    ap = (al == NULL) ? 0:al->priority;
+    bp = (bl == NULL) ? 0:bl->priority;
+    return ap > bp;
+}
+
 /* Acquires LOCK, sleeping until it becomes available if
    necessary.  The lock must not already be held by the current
    thread.
@@ -220,25 +229,37 @@ lock_acquire (struct lock *lock)
             lock->holder->priority = cur->priority;
 
         /* Xiaoyu: may boost other threads to solve nested donation */
-        /* Nest depth is 2, just for passing the test */
+
         struct list_elem *e;
         struct lock_elem *l;
         struct list_elem *et;
         struct thread *t;
 
+        /* for (e = list_begin (&lock_list); e != list_end (&lock_list); e = list_next (e)){ */
+        /*     l = list_entry (e, struct lock_elem, elem); */
+        /*     if(l->lock->holder != NULL && lock->holder != l->lock->holder){ */
+        /*         for (et = list_begin (&l->lock->semaphore.waiters); */
+        /*              et != list_end (&l->lock->semaphore.waiters); */
+        /*              et = list_next (et)) */
+        /*         { */
+        /*             t = list_entry(et, struct thread, elem); */
+        /*             if(t == lock->holder && l->lock->holder->priority < t->priority){ */
+        /*                 l->lock->holder->priority = t->priority; */
+        /*             } */
+        /*         } */
+        /*     } */
+        /* } */
+        
+        /* Xiaoyu: sort the lock_list by holder priority from high to low */
+        list_sort(&lock_list, lock_higher, NULL);
+        
         for (e = list_begin (&lock_list); e != list_end (&lock_list); e = list_next (e)){
             l = list_entry (e, struct lock_elem, elem);
-            if(l->lock->holder != NULL && lock->holder != l->lock->holder){
-                for (et = list_begin (&l->lock->semaphore.waiters);
-                     et != list_end (&l->lock->semaphore.waiters);
-                     et = list_next (et))
-                {
-                    t = list_entry(et, struct thread, elem);
-                    if(t == lock->holder && l->lock->holder->priority < t->priority){
-                        l->lock->holder->priority = t->priority;
-                    }
-                }
-            }
+            t = list_entry(list_max(&l->lock->semaphore.waiters, priority_higher, NULL),
+                           struct thread,
+                           elem);
+            if(l->lock->holder != NULL && t->priority > l->lock->holder->priority)
+                l->lock->holder->priority = t->priority;
         }
     }
     
@@ -279,7 +300,6 @@ lock_release (struct lock *lock)
     ASSERT (lock != NULL);
     ASSERT (lock_held_by_current_thread (lock));
     struct thread* cur = thread_current();
-    int cur_priority = cur->priority;
     enum intr_level old_level = intr_disable();
 
     /* Xiaoyu: set back priority */
@@ -305,8 +325,9 @@ lock_release (struct lock *lock)
     }
     sema_up (&lock->semaphore);
 
-    if(cur->priority < cur_priority)
-        thread_yield();
+    /* Xiaoyu: if thread_yield() here, some tests will not be passed. */
+    /* if(cur->priority < list_entry(list_max(&ready_list, priority_higher, NULL), struct thread, elem)->priority) */
+    /*     thread_yield(); */
     
     intr_set_level(old_level);
 }

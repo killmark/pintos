@@ -98,6 +98,14 @@ struct thread
     /* Xiaoyu: add a new attribute to record original priority */
     int old_priority;
 
+    /* int32_t: int */
+    /* int64_t fixed-point */
+    /* Xiaoyu: nice point */
+    int32_t nice;
+
+    /* Xiaoyu: recent CPU */
+    int64_t recent_cpu;
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
@@ -148,4 +156,12 @@ bool priority_higher (const struct list_elem *a,
                       const struct list_elem *b,void *aux);
 bool alloc_ready;
 
+/* Xiaoyu: for mlfqs */
+void renew_priority(struct thread* t);
+void renew_recent_cpu(struct thread* t);
+int get_ready_threads(void);
+void renew_all_cpu(void);
+void renew_all_priority(void);
+void renew_load_avg(void);
+    
 #endif /* threads/thread.h */
